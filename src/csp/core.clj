@@ -147,3 +147,38 @@
      (go
        (>! xy [10 3])
        (<! qr)))))
+
+;;; Problem: Compute a factorial by the recursive method, to a given
+;;; limit
+
+;; [fac( i: 1..limit)::
+;;  * [n:integer;fac(i - 1)?n ->
+;;     [n = 0 -> fac(i - 1)!1
+;;      || n > 0 -> fac(i + 1)!n- 1;
+;;         r:integer;fac(i + 1)?r;fac(i - i)!(n * r)
+;;      ]
+;;    ]
+;;      || fac(0)::USER
+;; ]
+
+(defn factorial
+  [limit]
+  (let [chans (vec (repeatedly (inc limit) chan))
+        fac (fn [n] (chans n))]
+    (loop [i 1]
+      (if (> i limit)
+        (chans 0)
+        (do
+          (go-loop  []
+            (let [n (<! (fac (dec i)))]
+              (if (or (zero? n) (== 1 n))
+                (>! (fac (dec i)) 1)
+                (do
+                  (>! (fac i) (dec n))
+                  (>! (fac (dec i)) (* n (<! (fac i)))))))
+            (recur))
+          (recur (inc i)))))))
+
+(comment
+  (def -fac (factorial 10))
+  (a/<!! (go (>! -fac 6) (<! -fac))))
