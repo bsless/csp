@@ -7,57 +7,84 @@
 ;;; Problem: Write a process X to copy characters output by
 ;;; process west to process east.
 
-(defn dirty-copy
-  [east west]
-  (go
-    (loop []
-      (>! west (<! east))
-      (recur))))
+;; X :: *[c:character; west?c -> east!c]
 
 (defn copy
-  [east west]
+  [west east]
   (go-loop []
-    (let [v (<! east)]
-      (if (and v (>! west v))
+    (let [v (<! west)]
+      (if (and v (>! east v))
         (recur)
-        (close! west)))))
+        (close! east)))))
 
 ;;; Problem: Adapt the previous program to replace every
 ;; pair of consecutive asterisks "**" by an upward arrow
 ;; "^". Assume that the final character input is not an
 ;; asterisk.
 
-(defn squash
-  [east west]
+;; X :: *[c:character; west?c -->
+;;        [  c != asterisk --> east!c
+;;         ☐ c  = asterisk --> west?c ;
+;;           [  c != asterisk --> east!asterisk; east!c
+;;            ☐ c  = asterisk --> east!upward arrow ]
+;;        ]
+;;       ]
+
+
+(defn squash0
+  [west east]
   (go-loop []
-    (let [v (<! east)]
-      (if v
-        (do
-          (if (= v "*")
-            (let [v (<! east)]
-              (if (= v "*")
-                (>! west "^")
-                (do
-                  (>! west "*")
-                  (>! west v))))
-            (>! west v))
-          (recur))
-        (close! west)))))
+    (if (let [c (<! west)]
+          (and
+           c
+           (if (not= c \*)
+             (>! east c)
+             (let [c (<! west)]
+               (and
+                c
+                (if (not= c \*)
+                  (do (>! east \*) (>! east c))
+                  (>! east \^)))))))
+      (recur)
+      (close! east))))
+
+(defn squash
+  [west east]
+  (go-loop []
+    (if (when-let [c (<! west)]
+          (if (not= c \*)
+            (>! east c)
+            (when-let [c (<! west)]
+              (if (not= c \*)
+                (do (>! east \*) (>! east c))
+                (>! east \^)))))
+      (recur)
+      (close! east))))
 
 
 ;;; Problem: to read cards from a cardfile and output to
 ;; process X the stream of characters they contain. An extra
 ;; space should be inserted at the end of each card.
 
+;; *[cardimage:(l..80)character; cardfile?cardimage
+;;   i:integer; i := 1;
+;;   *[i <= 80 -> X!cardimage(i); i -> i + 1]
+;;     X!space
+;;     ]
+
+
 (defn disassemble
   [cardfile out]
   (go
     (loop []
-      (let [arr (<! cardfile)]
-        (when arr
-          (doseq [c arr]
-            (>! out c))
-          (recur))))
+      (when-let [arr (<! cardfile)]
+        (loop [i 0]
+          (when
+              (and
+               (<= i 80)
+               (>! out (nth arr i)))
+            (recur (inc i))))
+        (recur)))
     (>! out \space)
     (close! out)))
 
@@ -182,3 +209,51 @@
 (comment
   (def -fac (factorial 10))
   (a/<!! (go (>! -fac 6) (<! -fac))))
+
+;;; 4.3 Data Representation: Small Set of Integers
+;;; Problem: To represent a set of not more than 100 integers as a
+;;; process, S, which accepts two kinds of instruction from its calling
+;;; process X: (1) S!insert(n), insert the integer n in the set, and (2)
+;;; S!has(n); ... ; S?b, b is set true if n is in the set, and false
+;;; otherwise. The initial value of the set is empty.
+
+;;; S::
+;;; content:(0..99)integer; size:integer; size .--- 0;
+;;; * [n:integer;X?has(n) -> SEARCH;X!(i < size)
+;;;    || n:integer; X?insert(n) -> SEARCH;
+;;;    [i < size -> skip
+;;;     || i = size; size < 100 -> content (size) := n; size := size + l
+;;;     ]
+;;;    ]
+;;; where SEARCH is an abbreviation for:
+;;;    i:integer; i := 0;
+;;;    * [i < size; content(i) != n 0 -> i := i + 1]
+
+(defn search
+  [arr size n]
+  (let [k (alength arr)]
+    (loop [i 0]
+      (when-not (== i k)
+        (if (or (= (aget ^objects arr i) n) (= i size))
+          i
+          (recur (inc i)))))))
+
+(defn linear-set
+  [limit]
+  (let [insert (a/chan)
+        has (a/chan)
+        at (a/chan)
+        arr (object-array limit)]
+    (go
+      (loop [size 0]
+        (a/alt!
+          has ([n] (search arr size n) (recur size))
+          at ([i] (aget ^objects arr i) (recur size))
+          insert
+          ([v insert]
+           (let [i (search arr size v)]
+             (if i
+               (do
+                 (aset ^objects arr i v)
+                 (recur (inc size)))
+               (recur size)))))))))
