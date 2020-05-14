@@ -1,0 +1,86 @@
+* Syntax
+  
+** Basics
+  
+*** BNF
+
+    #+begin_src bnf
+      <command> ::= <simple command>|<structured command>
+      <simple command> ::= <null command>|<assignment command>|<input command>|<output command>
+      <structured command> ::= <alternative command>|<repetitive command>|<parallel command>
+      <null command> ::= skip
+      <command list> ::= {<declaration>\; |<command>\;} <command>
+    #+end_src
+  
+*** core.async
+   
+    #+begin_src clojure
+      (comment
+        ;;; Simple command
+        nil ; null command
+        (let []) ; assignment
+        (<! ch) ; input
+        (>! ch) ; output
+
+        ;;; Structured command
+        (alt! ) (alts!) ; alternative command
+        (loop ) ; repetitive command
+        (go) ; parallel command
+
+        ;;; Command List
+        (let [] body)
+        (do)
+        )
+    #+end_src
+
+** Parallel Commands
+
+*** BNF
+    
+    #+begin_src bnf
+      <parallel command> ::= [ <process> {||<process>} ]
+      <process> ::= <process label> <command list>
+      <process label> ::= <empty>l<identifier>:: |<identifier>(<label subscript>{,<label subscript>})::
+      <label subscript> ::= <integer constant>|<range>
+      <integer constant> ::= <numeral>|<bound variable>
+      <bound variable> ::= <identifier>
+      <range> ::= <bound variable>:<lower bound>..<upper bound>
+      <lower bound> ::= <integer constant>
+      <upper bound> ::= <integer constant>
+
+    #+end_src
+
+*** Core.async
+    
+    #+begin_src clojure
+      (comment
+        (go expr1 expr2 ... exprn) ; process
+        (do
+          (go ...)
+          (go ...)) ; parallel command
+        )
+    #+end_src
+
+** Alternative And Repeated Commands
+
+*** BNF
+    
+    #+begin_src bnf
+      <repetitive command> ::=*<alternative command>
+      <alternative command> ::= [<guarded command> {☐<guarded command>} ]
+      <guarded command> ::= <guard> --\> <command list>|(<range>{,<range>})<guard> --\> <command list>
+      <guard> ::= <guard list>|<guard list>\;<input command>|<input command>
+      <guard list> ::= <guard element>{\;<gnard element>}
+      <guard element> ::= <boolean expression>|<declaration>
+    #+end_src
+
+    
+*** core.async
+    
+    #+begin_src clojure
+      (comment
+        (loop []) ; repetitive command
+        (or expr1 expr2) (alt! ch1 ch2) ; alternative command
+        (when p body) ; guarded command
+        )
+    #+end_src
