@@ -1,6 +1,6 @@
 (ns csp.core
   (:require
-   [clojure.core.async :as a :refer [<! >! chan go go-loop close! put! poll!]]))
+   [clojure.core.async :as a :refer [<! >! chan go go-loop close!]]))
 
 ;;; Coroutines
 
@@ -93,7 +93,23 @@
 ;;; and print them in lines of 125 characters on a lineprinter.
 ;;; The last line should be completed with spaces if necessary.
 
-(defn assemble
+;; lineimage:( 1.. 125)character;
+;; i:integer; i := 1;
+;; * [c:character; X?c
+;;    lineimage(i) := c;
+;;    [  i <= 124 --> i := i + I
+;;     ☐ i = 125 --> lineprinter!lineimage; i := 1
+;;    ]
+;;   ]; fill buffer
+;;   [  i = 1 -> skip
+;;    ☐ i > 1 -> *[i _< 125 ~ lineimage(i) := space; i := i + 1];
+;;      lineprinter!lineimage ;;; pad buffer
+;;   ]
+
+
+;;; Intuitive implementation
+
+(defn -assemble
   [cs printer]
   (go
     (let [[i arr]
@@ -105,12 +121,72 @@
                 (if c
                   (recur (inc i) (conj arr c))
                   [i arr]))))]
-      (if (not= i 125)
+      (when (not= i 125)
         (loop [i i
                arr arr]
           (if (= i 125)
             (do (>! printer arr) (close! cs))
             (recur (inc i) (conj arr \space))))))))
+
+;;; More 1-1 implementation without extra constructs
+
+(defn assemble
+  [cs printer]
+  (go
+    (let [[i arr]
+          (loop [i 1
+                 arr []]
+            (if-let [c (<! cs)]
+              (let [arr (conj arr c)]
+                (cond
+                  (= i 125) (do (>! printer arr) (recur 0 []))
+                  (<= i 124) (recur (inc i) arr)))
+              [i arr]))]
+      (cond
+        (= i 1) true
+        (> i 1)
+        (loop [i i
+               arr arr]
+          (if (<= i 125)
+            (recur (inc i) (conj arr \space))
+            (do (>! printer arr) (close! cs))))))))
+
+
+(defmacro alt
+  [& bodies]
+  `(go
+     (let [ps# (a/merge ~(mapv (fn [body] `(go ~@body)) bodies))]
+       (loop []
+         (let [v# (<! ps#)]
+           (if (nil? v#)
+             v#
+             (or v# (recur))))))))
+
+;;; Fully equivalent implementation
+
+(defn assemble
+  [cs printer]
+  (go
+    (let [[i arr]
+          (loop [i 1
+                 arr []]
+            (when-let [c (<! cs)]
+              (let [[i arr]
+                    (alt
+                     [(when (<= i 124)
+                        [(inc i) (conj arr c)])]
+                     [(when (= i 125)
+                        (>! printer arr)
+                        [1 []])])]
+                (recur i arr))))]
+      (alt
+       [(when (= i 1) true)]
+       [(when (> i 1)
+          (loop [i i
+                 arr arr]
+            (if (= i 125)
+              (do (>! printer arr) (close! cs))
+              (recur (inc i) (conj arr \space)))))]))))
 
 ;;; Problem: Read a sequence of cards of 80 characters each,
 ;; and print the characters on a linepfinter at 125 characters
@@ -122,7 +198,7 @@
   [west east]
   (let [in (chan)
         out (chan)]
-    [(disassemble west in) (copy in out) (assemble out west)]))
+    [(disassemble west in) (copy in out) (assemble out east)]))
 
 
 ;;; Problem: Adapt the above program to replace every pair
@@ -132,7 +208,7 @@
   [west east]
   (let [in (chan)
         out (chan)]
-    [(disassemble west in) (squash in out) (assemble out west)]))
+    [(disassemble west in) (squash in out) (assemble out east)]))
 
 
 ;;; Subroutines and data representation
@@ -153,27 +229,21 @@
 
 
 (defn div
-  [xy]
-  (let [qr (chan)]
+  []
+  (let [qr (chan)
+        xy (chan)]
     (go
       (loop []
-        (let [[-x -y] (<! xy)]
-          (if (and x y)
-            (loop [-r -x -q 0]
-              (if (>= -r -y)
-                (recur (- -r -y) (inc -q))
-                (>! qr [-q -r])))
-            (close! qr)))))
-    qr))
+        (if-let [[x y] (<! xy)]
+          (let [[q r]
+                (loop [r x q 0]
+                  (if (>= r y)
+                    (recur (- r y) (inc q))
+                    [q r]))]
+            (>! qr [q r]))
+          (close! qr))))
+    {:in xy :out qr}))
 
-
-(comment
-  (a/<!!
-   (let [xy (chan)
-         qr (div xy)]
-     (go
-       (>! xy [10 3])
-       (<! qr)))))
 
 ;;; Problem: Compute a factorial by the recursive method, to a given
 ;;; limit
@@ -181,28 +251,29 @@
 ;; [fac( i: 1..limit)::
 ;;  * [n:integer;fac(i - 1)?n ->
 ;;     [n = 0 -> fac(i - 1)!1
-;;      || n > 0 -> fac(i + 1)!n- 1;
+;;      ☐ n > 0 -> fac(i + 1)!n- 1;
 ;;         r:integer;fac(i + 1)?r;fac(i - i)!(n * r)
 ;;      ]
 ;;    ]
 ;;      || fac(0)::USER
 ;; ]
 
+;;; NOTE: Is i+1 a mistake?
+
 (defn factorial
   [limit]
-  (let [chans (vec (repeatedly (inc limit) chan))
-        fac (fn [n] (chans n))]
+  (let [fac (vec (repeatedly (inc limit) chan))]
     (loop [i 1]
       (if (> i limit)
-        (chans 0)
+        (fac 0)
         (do
           (go-loop  []
             (let [n (<! (fac (dec i)))]
-              (if (or (zero? n) (== 1 n))
-                (>! (fac (dec i)) 1)
-                (do
-                  (>! (fac i) (dec n))
-                  (>! (fac (dec i)) (* n (<! (fac i)))))))
+              (cond
+                (or (zero? n) (== 1 n)) (>! (fac (dec i)) 1)
+                (> n 1) (do (>! (fac i) (dec n))
+                            (let [r (<! (fac i))]
+                              (>! (fac (dec i)) (* n r))))))
             (recur))
           (recur (inc i)))))))
 
@@ -220,9 +291,9 @@
 ;;; S::
 ;;; content:(0..99)integer; size:integer; size .--- 0;
 ;;; * [n:integer;X?has(n) -> SEARCH;X!(i < size)
-;;;    || n:integer; X?insert(n) -> SEARCH;
+;;;    ☐  n:integer; X?insert(n) -> SEARCH;
 ;;;    [i < size -> skip
-;;;     || i = size; size < 100 -> content (size) := n; size := size + l
+;;;     ☐  i = size; size < 100 -> content (size) := n; size := size + l
 ;;;     ]
 ;;;    ]
 ;;; where SEARCH is an abbreviation for:
@@ -231,12 +302,11 @@
 
 (defn search
   [arr size n]
-  (let [k (alength arr)]
-    (loop [i 0]
-      (when-not (== i k)
-        (if (or (= (aget ^objects arr i) n) (= i size))
-          i
-          (recur (inc i)))))))
+  (loop [i 0]
+    (cond
+      (== i size) i
+      (= (aget ^objects arr i) n) i
+      :else (recur (inc i)))))
 
 (defn linear-set
   [limit]
@@ -244,16 +314,73 @@
         has (a/chan)
         at (a/chan)
         arr (object-array limit)]
-    (go
-      (loop [size 0]
-        (a/alt!
-          has ([n] (search arr size n) (recur size))
-          at ([i] (aget ^objects arr i) (recur size))
-          insert
-          ([v insert]
-           (let [i (search arr size v)]
-             (if i
-               (do
-                 (aset ^objects arr i v)
-                 (recur (inc size)))
-               (recur size)))))))))
+    (go-loop [size 0]
+      (a/alt!
+        has ([n] (>! has (let [i (search arr size n)] (and (< i size) i))) (recur size))
+        at ([i] (>! at (aget ^objects arr i)) (recur size))
+        insert
+        ([v insert]
+         (let [i (search arr size v)]
+           (cond
+             (< i size) (recur size)
+             (and (== i size) (< size limit))
+             (do (aset ^objects arr i v) (recur (inc size))))))))
+    {:insert insert :has has :at at}))
+
+;;; Recursive data representation
+
+;;; S(i: I.. 100)::
+;;; * [n:integer; S (i - 1)?has(n) -> S(0)!false
+;;;    ☐ n:integer; S (i - 1)?insert(n) ->
+;;;    * [m:integer; S(i - 1)?has(m) ->
+;;;       [  m <= n -> S(0)!(m = n)
+;;;        ☐ m >  n -> S(i + 1)!has(m)
+;;;       ]
+;;;       ☐ m:integer; S(i - 1)?insert(m) ->
+;;;         [ m < n -> S(i + 1)!insert(n); n := m
+;;;          ☐ m = n -> skip
+;;;          ☐ m > n -> S(i + 1)!insert(m)
+;;;          ]
+;;;     ]
+;;;    ]
+
+(defn rec-set
+  [limit]
+  (let [has (vec (repeatedly (+ 1 limit) chan))
+        insert (vec (repeatedly (+ 1 limit) chan))
+        s0 (chan)]
+    (loop [i 0]
+      (when (< i limit)
+        (let [i+1 (inc i)
+              -has (has i)
+              +has (has i+1)
+              -insert (insert i)
+              +insert (insert i+1)]
+          (go
+            (let [n
+                  (loop []
+                    (assert (some? -has) (str "has" i "is nil!"))
+                    (assert (some? -insert) (str "insert" i "is nil!"))
+                    (a/alt!
+                      -has ([v] (>! s0 false) (recur))
+                      -insert ([v] v)))]
+              (loop [n n]
+                (assert (some? +has) (str "has" i+1 "is nil!"))
+                (assert (some? +insert) (str "insert" i+1 "is nil!"))
+                (a/alt!
+                  -has
+                  ([m]
+                   (cond
+                     (<= m n) (>! s0 (= m n))
+                     (> m n)  (>! +has m))
+                   (recur n))
+                  -insert
+                  ([m]
+                   (cond
+                     (< m n) (do (>! +insert n) (recur m))
+                     (> m n) (do (>! +insert m) (recur n))
+                     (= m n) (recur n)))))))
+          (recur (inc i)))))
+    {:has (has 1) :insert (insert 1) :s s0}))
+
+
