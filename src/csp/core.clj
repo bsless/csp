@@ -384,3 +384,65 @@
     {:has (has 1) :insert (insert 1) :s s0}))
 
 
+;;; 5.1 Bounded Buffer
+;;; Problem: Construct a buffering process X to smooth
+;;; variations in the speed of output of portions by a pro-
+;;; ducer process and input by a consumer process. The
+;;; consumer contains pairs of commands X!more( );
+;;; X?p, and the producer contains commands of the form
+;;; X!p. The buffer should contain up to ten portions.
+;;; Solution:
+;;; X::
+;;; buffer:(0..9) portion;
+;;; in,out:integer; in := 0; out := 0;
+;;; comment 0 <= out <= in <= out + 10;
+;;; *[  in < out + 10; producer?buffer(in mod 10) -> in := in + 1
+;;;   ☐ out < in; consumer?more( ) --> consumer!buffer(out mod 10);
+;;;    out := out + 1
+;;;    ]
+
+
+(defn buffer
+  [limit producer consumer]
+  (let [buf (object-array limit)]
+    (go-loop [in 0 out 0]
+      (a/alt!
+        producer
+        ([v]
+         (if (< in (+ out limit))
+           (do
+             (aset ^objects buf (mod in limit) v)
+             (recur (inc in) out))
+           (recur in out)))
+        [[consumer (or (aget ^objects buf (mod out limit)) false)]]
+        ([_]
+         (if (< out in)
+           (recur in (inc out))
+           (recur in out)))))))
+
+(comment
+  (def producer (a/chan))
+  (def consumer (a/chan))
+  (def buf (buffer 3 producer consumer))
+  (a/offer! producer 2)
+  (a/poll! consumer)
+  (a/close! producer)
+  (a/close! consumer))
+
+(defn pbuf
+  [limit producer consumer]
+  (let [chans (concat [producer] (repeatedly limit a/chan) [consumer])
+        pairs (map vector chans (drop 1 chans))]
+    (doseq [[f t] pairs]
+      (a/pipe f t))))
+
+
+(comment
+  (def producer (a/chan))
+  (def consumer (a/chan))
+  (def buf (pbuf 3 producer consumer))
+  (a/offer! producer 1)
+  (a/offer! producer 2)
+  (a/offer! producer 3)
+  (a/offer! producer 4)
+  (a/poll! consumer))
